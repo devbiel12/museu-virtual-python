@@ -21,11 +21,26 @@ A aplicação atual implementa três exposições principais:
 
 ## Estrutura do projeto
 
+O código foi dividido em **pacotes e módulos por responsabilidade**, mantendo `main.py` apenas como ponto de entrada:
+
 ```text
-museu-virtual-python-devbiel12-patch-1/
+museu-virtual-python/
 ├── README.md
 ├── Museu_virtual/
 │   ├── main.py
+│   ├── museu/
+│   │   ├── __init__.py
+│   │   ├── museum.py
+│   │   ├── config.py
+│   │   ├── math3d.py
+│   │   ├── geometry.py
+│   │   ├── objects.py
+│   │   ├── scene.py
+│   │   ├── navigation.py
+│   │   ├── animation.py
+│   │   ├── renderer.py
+│   │   ├── ui.py
+│   │   └── app.py
 │   └── assets/
 │       ├── download_assets.py
 │       ├── nefertiti_bust.obj
@@ -34,7 +49,24 @@ museu-virtual-python-devbiel12-patch-1/
 └── .gitignore
 ```
 
-> O arquivo principal do projeto está em `Museu_virtual/main.py` e o downloader de assets em `Museu_virtual/assets/download_assets.py`.
+### Responsabilidade dos módulos
+
+| Módulo | Responsabilidade |
+|---|---|
+| `main.py` | Ponto de entrada da aplicação |
+| `museu/museum.py` | Monta a classe `MuseuVirtual3D` |
+| `museu/config.py` | Configurações, dimensões, FPS, caminhos e cores |
+| `museu/math3d.py` | Vetores, transformações, câmera e projeção 3D |
+| `museu/geometry.py` | Geometrias estáticas, modelos e carregamento OBJ |
+| `museu/objects.py` | `Objeto3D` e `PortaArticulada` |
+| `museu/scene.py` | Criação, inicialização e estado da cena |
+| `museu/navigation.py` | Movimento, colisões e portas |
+| `museu/animation.py` | Atualização temporal e animações |
+| `museu/renderer.py` | Piso, paredes, objetos, obras e iluminação |
+| `museu/ui.py` | HUD e tela de créditos |
+| `museu/app.py` | Loop principal, eventos e execução da aplicação |
+
+> A classe `MuseuVirtual3D` continua existindo com o mesmo nome. A implementação foi organizada em módulos especializados, facilitando manutenção e evolução do projeto.
 
 ## Requisitos
 

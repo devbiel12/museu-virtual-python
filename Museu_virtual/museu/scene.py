@@ -1,7 +1,6 @@
-"""Módulo de scene da aplicação."""
+"""Inicialização da cena: pygame, câmera, objetos, metadados e iluminação."""
 import math
 import os
-import sys
 import pygame
 
 from .config import *
@@ -14,91 +13,142 @@ class SceneMixin:
         def __init__(self):
             pygame.init()
             pygame.display.set_caption("Museu Virtual 3D — História da Arte e da Antiguidade (AP1)")
-            self.tela = pygame.display.set_mode((LARGURA, ALTURA))
+            self.tela = self._abrir_janela()
             self.relogio = pygame.time.Clock()
 
-            # Fontes Tipográficas
-            self.fonte_titulo = pygame.font.SysFont("Georgia", 22, bold=True)
-            self.fonte_subtitulo = pygame.font.SysFont("Arial", 16, bold=True)
-            self.fonte_hud = pygame.font.SysFont("Arial", 15)
-            self.fonte_pequena = pygame.font.SysFont("Arial", 12)
-            self.fonte_placa = pygame.font.SysFont("Georgia", 11, bold=True)
+            # Só os eventos realmente usados chegam à fila: menos trabalho por quadro.
+            pygame.event.set_allowed([pygame.QUIT, pygame.KEYDOWN,
+                                      pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP,
+                                      pygame.MOUSEMOTION])
 
-            # Máquina de Estados da Visita Guiada (Requisito Obrigatório AP1)
+            # Fontes tipográficas, dimensionadas junto com o tamanho da janela
+            def fonte(nome, tamanho_base, negrito=False):
+                tamanho = max(10, round(tamanho_base * ESCALA))
+                return pygame.font.SysFont(nome, tamanho, bold=negrito)
+
+            self.fonte_titulo = fonte("Georgia", 22, True)
+            self.fonte_subtitulo = fonte("Arial", 16, True)
+            self.fonte_hud = fonte("Arial", 15)
+            self.fonte_pequena = fonte("Arial", 12)
+            self.fonte_placa = fonte("Georgia", 11, True)
+
+            # Máquina de estados da visita guiada
             self.ESTADO_PARADO = "PARADO"
             self.ESTADO_EXECUTANDO = "EXECUTANDO"
             self.ESTADO_PAUSADO = "PAUSADO"
             self.ESTADO_CONCLUIDO = "CONCLUIDO"
             self.estado_atual = self.ESTADO_PARADO
 
-            # Modos de Apresentação e Navegação da Câmera
+            # Modos de apresentação e navegação
             self.MODO_APRESENTACAO = "APRESENTAÇÃO AP1 (DISCRETO)"
             self.MODO_NAVEGACAO_LIVRE = "NAVEGAÇÃO LIVRE (WASD + MOUSE)"
             self.modo_operacao = self.MODO_APRESENTACAO
 
-            # Submodos de Câmera da Apresentação
+            # Submodos de câmera da apresentação
             self.MODO_CAM_GERAL = "PLANO_GERAL"
-            self.MODO_CAM_FOCO  = "FOCO_ANIMADO"
+            self.MODO_CAM_FOCO = "FOCO_ANIMADO"
             self.submodo_cam = self.MODO_CAM_GERAL
 
-            # Coordenadas e Ângulos da Câmera
+            # Coordenadas e ângulos da câmera
             self.cam_pos_geral = [0.0, 1.8, -1.8]
             self.cam_pos_atual = list(self.cam_pos_geral)
-            self.cam_pos_alvo  = list(self.cam_pos_geral)
+            self.cam_pos_alvo = list(self.cam_pos_geral)
             self.cam_yaw_atual = 0.0
-            self.cam_yaw_alvo  = 0.0
+            self.cam_yaw_alvo = 0.0
             self.cam_pitch_atual = 0.0
-            self.cam_pitch_alvo  = 0.0
+            self.cam_pitch_alvo = 0.0
+
+            # Câmera com trigonometria em cache, sincronizada uma vez por quadro
+            self.cam = Camera(self.cam_pos_atual, self.cam_yaw_atual, self.cam_pitch_atual)
 
             # Mouse look
             self.mouse_arrastando = False
             self.mouse_ultimo_pos = (0, 0)
             self.sensibilidade_mouse = 0.0035
 
-            # Cronômetro e Etapas
+            # Cronômetro e etapas
             self.obra_foco_idx = 0
             self.tempo_animacao = 0.0
-            self.duracao_etapa = 7.5 # Segundos por sala na visita guiada
+            self.duracao_etapa = 7.5  # segundos por sala na visita guiada
             self.exibir_creditos = False
+            self.mostrar_fps = False
 
             # Controles específicos da apresentação da escultura
             self.escultura_rodando = True
             self.escultura_rot_manual = 0.0
 
-            # Carregar Texturas/Imagens das Obras de Arte
-            self.carregar_imagens_obras()
+            # Buffers reaproveitados entre quadros
+            self._buffer_vidro = pygame.Surface((LARGURA, ALTURA), pygame.SRCALPHA, 32)
+            self._scratch_mascara = None
+            self._cache_arte = {}
+            self._cache_texto = {}
 
-            # Inicializar Cena 3D, Galerias, Modelos e Spots
+            self.carregar_imagens_obras()
             self.inicializar_obras_e_galerias()
+            self.preparar_cache_hud()
 
         # -------------------------------------------------------------------------
-        # INICIALIZAÇÃO DE ASSETS E MATERIAIS
+        # JANELA E CÂMERA
+        # -------------------------------------------------------------------------
+
+        def _abrir_janela(self):
+            """Abre a janela com double buffer e, se possível, com vsync."""
+            flags = pygame.DOUBLEBUF
+            if USAR_VSYNC:
+                try:
+                    return pygame.display.set_mode((LARGURA, ALTURA), flags, vsync=1)
+                except (TypeError, pygame.error):
+                    pass
+            return pygame.display.set_mode((LARGURA, ALTURA), flags)
+
+        def sincronizar_camera(self):
+            """Recalcula a trigonometria da câmera — uma vez por quadro, não por vértice."""
+            self.cam.sincronizar(self.cam_pos_atual, self.cam_yaw_atual, self.cam_pitch_atual)
+
+        # -------------------------------------------------------------------------
+        # ASSETS E MATERIAIS
         # -------------------------------------------------------------------------
 
         def carregar_imagens_obras(self):
-            """Carrega e prepara as superfícies das obras históricas em domínio público."""
-            # 1. A Ilha dos Mortos
+            """Carrega as texturas das obras, já no tamanho de trabalho.
+
+            Além da versão iluminada, guarda uma cópia escurecida pronta. Assim a
+            penumbra não custa uma superfície nova e uma composição por fatia a
+            cada quadro — basta escolher qual imagem usar.
+            """
             if os.path.exists(PATH_TOTENINSEL):
-                img_bruta = pygame.image.load(PATH_TOTENINSEL).convert()
-                # Escala prévia para manter alto desempenho no laço principal
-                self.img_toteninsel = pygame.transform.smoothscale(img_bruta, (860, 480))
+                bruta = pygame.image.load(PATH_TOTENINSEL).convert()
+                self.img_toteninsel = pygame.transform.smoothscale(bruta, (860, 480))
             else:
                 self.img_toteninsel = pygame.Surface((860, 480))
                 self.img_toteninsel.fill((20, 30, 45))
                 pygame.draw.circle(self.img_toteninsel, (200, 220, 255), (430, 200), 70)
+            self.img_toteninsel = self.img_toteninsel.convert()
 
-            # 2. Papiro de Ani (Livro dos Mortos)
+            sombra = pygame.Surface(self.img_toteninsel.get_size(), pygame.SRCALPHA)
+            sombra.fill((0, 0, 0, 140))
+            self.img_toteninsel_escura = self.img_toteninsel.copy()
+            self.img_toteninsel_escura.blit(sombra, (0, 0))
+            self.img_toteninsel_escura = self.img_toteninsel_escura.convert()
+
             if os.path.exists(PATH_PAPYRUS):
-                img_bruta = pygame.image.load(PATH_PAPYRUS).convert()
-                self.img_papiro = pygame.transform.smoothscale(img_bruta, (780, 420))
+                bruta = pygame.image.load(PATH_PAPYRUS).convert()
+                self.img_papiro = pygame.transform.smoothscale(bruta, (780, 420))
             else:
                 self.img_papiro = pygame.Surface((780, 420))
                 self.img_papiro.fill((210, 180, 130))
+            self.img_papiro = self.img_papiro.convert()
 
+            self.img_papiro_escuro = self.img_papiro.copy()
+            self.img_papiro_escuro.fill((150, 150, 150), special_flags=pygame.BLEND_MULT)
+            self.img_papiro_escuro = self.img_papiro_escuro.convert()
+
+        # -------------------------------------------------------------------------
+        # CENA
+        # -------------------------------------------------------------------------
 
         def inicializar_obras_e_galerias(self):
-            """Monta a planta baixa do museu com 3 salas temáticas e objetos 3D."""
-            # Metadados Didáticos e Históricos das Três Obras (1: Escultura, 2: Pintura, 3: Papiro)
+            """Cria e posiciona pedestais, obras, vitrines, placas e portas."""
             self.info_obras = [
                 {
                     "sala": "SALA 1: GALERIA DE ESCULTURAS DA ANTIGUIDADE",
@@ -144,110 +194,96 @@ class SceneMixin:
                 }
             ]
 
-            # 3 Luminárias LED no Teto com feixes cônicos (Sala 1: Escultura, Sala 2: Pintura, Sala 3: Papiro)
+            # Luminárias LED no teto, uma por sala temática
             self.spots_led = [
                 {"pos": [-8.0, 3.8,  8.5], "alvo": [-8.0, 1.4,  8.5], "cor": self.info_obras[0]["cor_spot"], "raio_cone": 2.0},
                 {"pos": [ 0.0, 3.8, 11.2], "alvo": [ 0.0, 1.6, 12.8], "cor": self.info_obras[1]["cor_spot"], "raio_cone": 2.4},
                 {"pos": [ 8.0, 3.8,  8.5], "alvo": [ 8.0, 2.0,  8.5], "cor": self.info_obras[2]["cor_spot"], "raio_cone": 2.5}
             ]
 
-            # ---------------------------------------------------------------------
-            # CRIAÇÃO DOS OBJETOS DA CENA (Atende ao Requisito 3 da AP1)
-            # ---------------------------------------------------------------------
             self.objetos = []
 
-            # 1. Três Instâncias de Pedestais com parâmetros diferentes (Requisito 3.1):
-            # Pedestal 1: Sala de Pinturas (suporte decorativo/banco central)
-            ped1 = Objeto3D("Pedestal_Sala1", VERTICES_PEDESTAL_COMPLETO, FACES_PEDESTAL_COMPLETO,
-                            pos=(0.0, -1.2, 5.0), escala=(0.8, 0.45, 0.8), cor_base=(100, 110, 130))
-            # Pedestal 2: Sala de Esculturas (pedestal de mármore esbelto para Nefertiti)
-            ped2 = Objeto3D("Pedestal_Sala2", VERTICES_PEDESTAL_COMPLETO, FACES_PEDESTAL_COMPLETO,
-                            pos=(-8.0, -1.2, 8.5), escala=(1.0, 0.9, 1.0), cor_base=COR_MARMORE_PED)
-            # Pedestal 3: Sala de Manuscritos (base de apoio arquitetônica, apoiada no piso)
-            ped3 = Objeto3D("Pedestal_Sala3", VERTICES_PEDESTAL_COMPLETO, FACES_PEDESTAL_COMPLETO,
-                            pos=(8.0, -1.2, 11.5), escala=(0.7, 0.9, 0.7), cor_base=(110, 80, 60))
-            # Mantém apenas o pedestal da escultura; os pilares auxiliares foram removidos.
-            self.pedestais = [ped2]
+            # 1. Pedestal de mármore da escultura (instância do modelo genérico)
+            ped_escultura = Objeto3D("Pedestal_Sala2", VERTICES_PEDESTAL_COMPLETO, FACES_PEDESTAL_COMPLETO,
+                                     pos=(-8.0, -1.2, 8.5), escala=(1.0, 0.9, 1.0), cor_base=COR_MARMORE_PED)
+            self.pedestais = [ped_escultura]
             self.objetos.extend(self.pedestais)
 
-            # 2. Obra 1 (Pintura): Moldura 3D clássica na parede norte da Sala Central
+            # 2. Moldura 3D de "A Ilha dos Mortos" na parede norte da sala central
             self.moldura_toteninsel = Objeto3D(
                 "Moldura_Toteninsel", VERTICES_MOLDURA_PINTURA, FACES_MOLDURA_PINTURA,
-                pos=(0.0, 1.7, 12.8), escala=(1.0, 1.0, 1.0), cor_base=COR_MOLDURA_OURO, eh_superficie_arte=True
+                pos=(0.0, 1.7, 12.8), escala=(1.0, 1.0, 1.0), cor_base=COR_MOLDURA_OURO,
+                eh_superficie_arte=True
             )
             self.objetos.append(self.moldura_toteninsel)
 
-            # 3. Obra 2 (Escultura): Busto de Nefertiti na Sala Oeste
-            # Carrega o OBJ otimizado (452 vértices / 894 faces) ou fallback
+            # 3. Busto de Nefertiti (OBJ de 452 vértices / 894 faces, ou fallback)
             v_nef, f_nef = carregar_obj(PATH_NEFERTITI)
-            if v_nef is None or len(v_nef) == 0:
+            if not v_nef:
                 v_nef, f_nef = gerar_malha_busto_fallback()
-            
-            # Posicionada no topo do pedestal da Sala 2 (y_pedestal topo = -1.2 + 1.7*0.9 ≈ 0.33)
+
             self.busto_nefertiti = Objeto3D(
                 "Busto_Nefertiti", v_nef, f_nef,
                 pos=(-8.0, 0.35, 8.5), escala=(0.85, 0.85, 0.85), cor_base=(215, 195, 160)
             )
             self.objetos.append(self.busto_nefertiti)
 
-            # 4. Obra 3 (Manuscrito): Vitrine de Madeira Nobre e Redoma 3D na Sala Leste
-            # Objeto Composto por Múltiplas Estruturas (Requisito 3.3)
+            # 4. Vitrine de madeira nobre e redoma translúcida da sala leste
             self.vitrine_papiro = Objeto3D(
-                "Vitrine_Papiro", VERTICES_VITRINE_MANUSCRITO, FACES_VITRINE_MANUSCRITO,
-                pos=(8.0, -0.55, 8.5), escala=(1.1, 1.65, 1.1), cor_base=COR_MOGNO_VITRINE, eh_superficie_arte=True
+                "Vitrine_Papiro", VERTICES_VITRINE_MANUSCRITO, FACES_VITRINE_BASE,
+                pos=(8.0, -0.55, 8.5), escala=(1.1, 1.65, 1.1), cor_base=COR_MOGNO_VITRINE,
+                eh_superficie_arte=True
             )
             self.objetos.append(self.vitrine_papiro)
 
-            # Folha de papiro como objeto 3D físico e fixo sobre o suporte da vitrine.
-            # A transformação é constante no mundo e não depende da câmera.
+            self.redoma_papiro = Objeto3D(
+                "Redoma_Papiro", VERTICES_VITRINE_MANUSCRITO, FACES_VITRINE_REDOMA,
+                pos=(8.0, -0.55, 8.5), escala=(1.1, 1.65, 1.1), eh_vidro=True
+            )
+            self.objetos.append(self.redoma_papiro)
+
+            # Folha de papiro apoiada no tampo inclinado da vitrine
             self.papiro_ani_obj = Objeto3D(
                 "Papiro_Ani", VERTICES_PAPIRO_ANI, FACES_PAPIRO_ANI,
-                # Mesma origem da vitrine: os vértices locais já acompanham o tampo inclinado.
                 pos=(8.0, -0.55, 8.5), escala=(1.0, 1.0, 1.0),
                 rot=(0.0, 0.0, 0.0), cor_base=(210, 185, 120)
             )
             self.objetos.append(self.papiro_ani_obj)
 
-            # 5. Objetos Simples sem partes: Três Placas de Identificação em Bronze (Requisito 3.2)
-            placa1 = Objeto3D("Placa_Sala1", VERTICES_PLACA, FACES_PLACA, pos=(0.0, -0.25, 12.75), escala=(0.8, 0.8, 1.0), cor_base=COR_PLACA_BRONZE)
-            placa2 = Objeto3D("Placa_Sala2", VERTICES_PLACA, FACES_PLACA, pos=(-8.0, -0.65, 7.55), escala=(0.7, 0.7, 1.0), cor_base=COR_PLACA_BRONZE)
-            placa3 = Objeto3D("Placa_Sala3", VERTICES_PLACA, FACES_PLACA, pos=(8.0, -0.15, 7.35), escala=(0.7, 0.7, 1.0), cor_base=COR_PLACA_BRONZE)
-            self.placas = [placa1, placa2, placa3]
+            # 5. Placas de identificação em bronze (objetos simples, sem partes)
+            self.placas = [
+                Objeto3D("Placa_Sala1", VERTICES_PLACA, FACES_PLACA, pos=(0.0, -0.25, 12.75), escala=(0.8, 0.8, 1.0), cor_base=COR_PLACA_BRONZE),
+                Objeto3D("Placa_Sala2", VERTICES_PLACA, FACES_PLACA, pos=(-8.0, -0.65, 7.55), escala=(0.7, 0.7, 1.0), cor_base=COR_PLACA_BRONZE),
+                Objeto3D("Placa_Sala3", VERTICES_PLACA, FACES_PLACA, pos=(8.0, -0.15, 7.35), escala=(0.7, 0.7, 1.0), cor_base=COR_PLACA_BRONZE),
+            ]
             self.objetos.extend(self.placas)
 
-            # 6. Paredes e Portais Arquitetônicos das Salas
             self.inicializar_arquitetura_paredes()
 
-
         def inicializar_arquitetura_paredes(self):
-            """Gera as faces 3D das paredes externas e divisórias com portais/arcos."""
-            # Paredes delimitadoras:
-            # Paredes de Fundo (Norte: z = 13.5), Laterais (x = -13.0 e +13.0), Sul (z = -3.5)
-            # Divisórias entre salas em x = -4.5 e x = +4.5 com abertura de passagem (z entre 2.5 e 7.0)
+            """Faces das paredes externas, divisórias, portais, teto e grade do piso."""
             y_chao, y_teto = -1.2, 4.0
             self.paredes_faces = [
-                # Parede Norte Central (atrás de Toteninsel)
+                # Parede norte central (atrás de Toteninsel)
                 [(-4.5, y_chao, 13.5), (4.5, y_chao, 13.5), (4.5, y_teto, 13.5), (-4.5, y_teto, 13.5)],
-                # Parede Norte Sala 2 (Esculturas)
+                # Parede norte da sala de esculturas
                 [(-13.0, y_chao, 13.5), (-4.5, y_chao, 13.5), (-4.5, y_teto, 13.5), (-13.0, y_teto, 13.5)],
-                # Parede Norte Sala 3 (Manuscritos)
+                # Parede norte da sala de manuscritos
                 [(4.5, y_chao, 13.5), (13.0, y_chao, 13.5), (13.0, y_teto, 13.5), (4.5, y_teto, 13.5)],
-                # Paredes Laterais Externas
+                # Paredes laterais externas
                 [(-13.0, y_chao, -3.5), (-13.0, y_chao, 13.5), (-13.0, y_teto, 13.5), (-13.0, y_teto, -3.5)],
                 [(13.0, y_chao, 13.5), (13.0, y_chao, -3.5), (13.0, y_teto, -3.5), (13.0, y_teto, 13.5)],
-                # Parede Sul (Frente da Galeria)
+                # Parede sul (frente da galeria)
                 [(13.0, y_chao, -3.5), (-13.0, y_chao, -3.5), (-13.0, y_teto, -3.5), (13.0, y_teto, -3.5)],
-                # Divisória Oeste: Trecho Fundo (z: 7.0 a 13.5)
+                # Divisória oeste: trecho do fundo e da frente
                 [(-4.5, y_chao, 7.0), (-4.5, y_chao, 13.5), (-4.5, y_teto, 13.5), (-4.5, y_teto, 7.0)],
-                # Divisória Oeste: Trecho Frente (z: -3.5 a 2.5)
                 [(-4.5, y_chao, -3.5), (-4.5, y_chao, 2.5), (-4.5, y_teto, 2.5), (-4.5, y_teto, -3.5)],
-                # Portal Oeste: Viga Superior do Arco (z: 2.5 a 7.0, y: 2.8 a 4.0)
+                # Viga superior do portal oeste
                 [(-4.5, 2.8, 2.5), (-4.5, 2.8, 7.0), (-4.5, y_teto, 7.0), (-4.5, y_teto, 2.5)],
-                # Divisória Leste: Trecho Fundo (z: 7.0 a 13.5)
+                # Divisória leste: trecho do fundo e da frente
                 [(4.5, y_chao, 13.5), (4.5, y_chao, 7.0), (4.5, y_teto, 7.0), (4.5, y_teto, 13.5)],
-                # Divisória Leste: Trecho Frente (z: -3.5 a 2.5)
                 [(4.5, y_chao, 2.5), (4.5, y_chao, -3.5), (4.5, y_teto, -3.5), (4.5, y_teto, 2.5)],
-                # Portal Leste: Viga Superior do Arco (z: 2.5 a 7.0, y: 2.8 a 4.0)
+                # Viga superior do portal leste
                 [(4.5, 2.8, 7.0), (4.5, 2.8, 2.5), (4.5, y_teto, 2.5), (4.5, y_teto, 7.0)],
             ]
             self.teto_faces = [[
@@ -256,18 +292,27 @@ class SceneMixin:
                 (13.0, y_teto, 13.5),
                 (-13.0, y_teto, 13.5)
             ]]
+
+            # Grade do piso pré-montada: os extremos das linhas não mudam nunca.
+            y_piso = -1.2
+            self.linhas_piso = [
+                ((x, y_piso, -3.5), (x, y_piso, 13.5)) for x in range(-13, 14, 2)
+            ] + [
+                ((-13.0, y_piso, z), (13.0, y_piso, z)) for z in range(-3, 14, 2)
+            ]
+
             self.portas = [
-                # Ambas as portas abrem suas folhas para dentro de suas respectivas galerias
-                PortaArticulada("Porta_Oeste", -4.5, -1.0, -1.0),
-                PortaArticulada("Porta_Leste", 4.5, 1.0, 1.0)
+                # As folhas abrem para a galeria central, sem esbarrar nos expositores
+                PortaArticulada("Porta_Oeste", -4.5, 1.0, 1.0),
+                PortaArticulada("Porta_Leste", 4.5, -1.0, -1.0)
             ]
 
         # -------------------------------------------------------------------------
-        # REINICIALIZAÇÃO DO MUSEU
+        # REINICIALIZAÇÃO
         # -------------------------------------------------------------------------
 
         def reiniciar(self):
-            """Reseta máquinas de estados, tempos, objetos e posicionamentos."""
+            """Volta tudo ao estado inicial: câmera, estados, timers, objetos e portas."""
             self.estado_atual = self.ESTADO_PARADO
             self.tempo_animacao = 0.0
             self.obra_foco_idx = 0
@@ -278,49 +323,27 @@ class SceneMixin:
             self.cam_yaw_atual = 0.0
             self.cam_pitch_alvo = 0.0
             self.cam_pitch_atual = 0.0
+            self.sincronizar_camera()
 
             for porta in self.portas:
                 porta.resetar()
-
             for obj in self.objetos:
                 obj.resetar()
+            self._cache_arte.clear()
 
         # -------------------------------------------------------------------------
-        # TESTE DE VISIBILIDADE / ILUMINAÇÃO BINÁRIA (REQUISITO 3.9)
-        # Inspirado em Traçado de Raio Simplificado (Ray Casting Cone-Sphere)
+        # ILUMINAÇÃO BINÁRIA (traçado de raio simplificado cone-esfera)
         # -------------------------------------------------------------------------
 
         def testar_iluminacao_binaria(self):
-            """
-            Calcula o traçado do raio de luz partindo de cada refletor LED no teto.
-            Se a distância entre o eixo central do feixe de luz ativo e a obra for
-            menor que o raio do cone de luz, a obra é marcada com ILUMINADO = 1 (True);
-            caso contrário, ILUMINADO = 0 (False - permanece na penumbra ambiente).
-            """
-            # Obra ativa recebe o foco do holofote principal
+            """Marca cada obra como iluminada quando ela cai dentro do cone do seu spot."""
+            obras = (self.busto_nefertiti, self.moldura_toteninsel, self.vitrine_papiro)
             for i, spot in enumerate(self.spots_led):
-                # A iluminação do spot i se ativa prioritariamente na etapa da sua sala
-                eh_spot_ativo = (i == self.obra_foco_idx)
-                
-                # Ponto de origem do raio no projetor e alvo no chão/objeto
-                origem_raio = spot["pos"]
-                alvo_spot   = spot["alvo"]
-
-                # Distância euclidiana entre a obra correspondente e o eixo do raio
-                obra = None
-                if i == 0: obra = self.busto_nefertiti
-                elif i == 1: obra = self.moldura_toteninsel
-                elif i == 2: obra = self.vitrine_papiro
-
-                dist = math.sqrt(
-                    (obra.pos[0] - alvo_spot[0])**2 +
-                    (obra.pos[1] - alvo_spot[1])**2 +
-                    (obra.pos[2] - alvo_spot[2])**2
-                )
-
-                # Teste Binário de Interseção Cone-Objeto
-                obra.iluminado = (eh_spot_ativo and dist <= spot["raio_cone"])
-
-        # -------------------------------------------------------------------------
-        # SISTEMA DE COLISÃO DO VISITANTE (MODO NAVEGAÇÃO LIVRE)
-        # -------------------------------------------------------------------------
+                obra = obras[i]
+                alvo = spot["alvo"]
+                dx = obra.pos[0] - alvo[0]
+                dy = obra.pos[1] - alvo[1]
+                dz = obra.pos[2] - alvo[2]
+                dentro_do_cone = (dx * dx + dy * dy + dz * dz) <= spot["raio_cone"] ** 2
+                obra.iluminado = (i == self.obra_foco_idx) and dentro_do_cone
+            self.redoma_papiro.iluminado = self.vitrine_papiro.iluminado

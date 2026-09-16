@@ -1,134 +1,188 @@
-"""Módulo de ui da aplicação."""
-import math
-import os
-import sys
+"""Interface sobreposta (HUD) e tela de créditos.
+
+Otimizações desta versão:
+- Painéis translúcidos e textos fixos são desenhados uma única vez e guardados
+  como superfícies prontas. Antes, cada quadro criava quatro superfícies com
+  canal alfa e rasterizava mais de vinte trechos de texto do zero.
+- Os textos variáveis passam por um cache por conteúdo: só rasterizam de novo
+  quando a frase realmente muda.
+- A tela de créditos inteira é montada uma vez e vira um único blit.
+
+Layout responsivo:
+- Painéis, margens e espessuras de traço usam esc(), que aplica o mesmo fator
+  ESCALA das fontes (veja config.py). Como a janela é dimensionada conforme a
+  tela do usuário, a interface cresce ou encolhe junto, em vez de manter um
+  tamanho de painel fixo que ficaria desproporcional em telas muito grandes
+  ou muito pequenas.
+"""
 import pygame
 
 from .config import *
-from .math3d import *
-from .geometry import *
-from .objects import *
+
+
+def esc(valor):
+    """Escala um valor em pixels pelo mesmo fator da janela. Mínimo de 1."""
+    resultado = round(valor * ESCALA)
+    return resultado if resultado > 0 else 1
 
 
 class UIMixin:
-        def desenhar_hud(self):
-            """Interface sobreposta com status, cronômetro, barra de progresso e comandos."""
-            # Painel Superior: Título do Museu e Identificação da Galeria
-            painel_top = pygame.Surface((LARGURA - 40, 78), pygame.SRCALPHA)
-            painel_top.fill(COR_HUD_BG)
-            self.tela.blit(painel_top, (20, 12))
 
-            txt_tit = self.fonte_titulo.render("MUSEU VIRTUAL 3D — HISTÓRIA DA ARTE E DA ANTIGUIDADE", True, COR_DESTAQUE_HUD)
-            self.tela.blit(txt_tit, (36, 18))
+        # ---------------------------------------------------------------------
+        # CACHE
+        # ---------------------------------------------------------------------
 
-            sala_nome = self.info_obras[self.obra_foco_idx]["sala"]
-            txt_sub = f"{sala_nome}  |  Estado: [{self.estado_atual}]  |  Modo: [{self.modo_operacao}]"
-            self.tela.blit(self.fonte_hud.render(txt_sub, True, COR_TEXTO_HUD), (36, 45))
+        def preparar_cache_hud(self):
+            """Monta as partes fixas do HUD uma única vez."""
+            self._painel_topo = pygame.Surface((LARGURA - esc(40), esc(78)), pygame.SRCALPHA)
+            self._painel_topo.fill(COR_HUD_BG)
 
-            # Barra de Progresso da Visita Guiada (Requisito AP1 3.8)
-            tempo_total = len(self.info_obras) * self.duracao_etapa
-            progresso = min(1.0, self.tempo_animacao / tempo_total) if tempo_total > 0 else 0.0
-            
-            largura_barra = 320
-            pygame.draw.rect(self.tela, (40, 50, 70), (LARGURA - 360, 48, largura_barra, 12), border_radius=4)
-            pygame.draw.rect(self.tela, COR_DESTAQUE_HUD, (LARGURA - 360, 48, int(largura_barra * progresso), 12), border_radius=4)
-            txt_prog = f"Progresso Tour: {int(progresso*100)}%"
-            self.tela.blit(self.fonte_pequena.render(txt_prog, True, COR_TEXTO_HUD), (LARGURA - 360, 28))
-
-            # Painel Inferior Esquerdo: Controles do Teclado e Mouse
-            painel_cmd = pygame.Surface((510, 120), pygame.SRCALPHA)
-            painel_cmd.fill(COR_HUD_BG)
-            self.tela.blit(painel_cmd, (20, ALTURA - 135))
-
-            self.tela.blit(self.fonte_subtitulo.render("Painel de Comandos e Controles:", True, COR_DESTAQUE_HUD), (32, ALTURA - 130))
+            largura_cmd, altura_cmd = esc(510), esc(120)
+            self._painel_comandos = pygame.Surface((largura_cmd, altura_cmd), pygame.SRCALPHA)
+            self._painel_comandos.fill(COR_HUD_BG)
+            self._painel_comandos.blit(
+                self.fonte_subtitulo.render("Painel de Comandos e Controles:", True, COR_DESTAQUE_HUD),
+                (esc(12), esc(5)))
             comandos = [
                 "[M] Alternar Modo: Apresentação AP1 <-> Navegação Livre (WASD + Mouse)",
                 "[ESPAÇO] Iniciar/Pausar/Retomar Visita  |  [R] Reiniciar  |  [C] Câmera",
                 "[1, 2, 3] Focar Obra Específica (Escultura, Pintura, Papiro)",
                 "[P] Parar/Continuar rotação da escultura  |  [← →] Girar manualmente",
-                "[N] / [B] Próxima / Anterior  |  [K] Créditos da Equipe  |  [ESC] Sair"
+                "[K] Créditos da Equipe  |  [F] FPS  |  [ESC] Sair",
             ]
-            for idx, cmd in enumerate(comandos):
-                self.tela.blit(self.fonte_pequena.render(cmd, True, COR_TEXTO_HUD), (32, ALTURA - 105 + idx * 19))
+            for i, cmd in enumerate(comandos):
+                self._painel_comandos.blit(
+                    self.fonte_pequena.render(cmd, True, COR_TEXTO_HUD), (esc(12), esc(30 + i * 19)))
 
-            # Painel Inferior Direito: Cartão Didático da Obra / Placa de Proximidade
-            obra_atual = self.info_obras[self.obra_foco_idx]
-            painel_obra = pygame.Surface((580, 185), pygame.SRCALPHA)
-            painel_obra.fill(COR_HUD_BG)
-            self.tela.blit(painel_obra, (LARGURA - 600, ALTURA - 195))
+            self._painel_obra = pygame.Surface((esc(580), esc(185)), pygame.SRCALPHA)
+            self._painel_obra.fill(COR_HUD_BG)
 
-            # Título da Obra e Artista
-            t_obra = self.fonte_subtitulo.render(obra_atual["titulo"], True, COR_DESTAQUE_HUD)
-            a_obra = self.fonte_hud.render(f"Autor: {obra_atual['artista']}", True, (255, 235, 170))
-            p_obra = self.fonte_pequena.render(f"Período / Data: {obra_atual['periodo']} ({obra_atual['data']})", True, COR_TEXTO_HUD)
-            m_obra = self.fonte_pequena.render(f"Material: {obra_atual['material']}  |  {obra_atual['localizacao']}", True, (190, 210, 230))
+            self._tela_creditos = self._montar_tela_creditos()
 
-            self.tela.blit(t_obra, (LARGURA - 585, ALTURA - 188))
-            self.tela.blit(a_obra, (LARGURA - 585, ALTURA - 165))
-            self.tela.blit(p_obra, (LARGURA - 585, ALTURA - 146))
-            self.tela.blit(m_obra, (LARGURA - 585, ALTURA - 128))
+        def _texto(self, fonte, conteudo, cor):
+            """Rasteriza um texto só quando ele muda; nas repetições devolve o cache."""
+            chave = (id(fonte), conteudo, cor)
+            superficie = self._cache_texto.get(chave)
+            if superficie is None:
+                if len(self._cache_texto) > 400:
+                    self._cache_texto.clear()
+                superficie = fonte.render(conteudo, True, cor)
+                self._cache_texto[chave] = superficie
+            return superficie
 
-            # Descrição multilinha sem sobreposição
-            linhas_desc = [l.strip() for l in obra_atual["desc"].split("\n") if l.strip()]
-            y_desc = ALTURA - 110
-            for l_txt in linhas_desc[:2]:
-                self.tela.blit(self.fonte_pequena.render(l_txt, True, COR_TEXTO_HUD), (LARGURA - 585, y_desc))
-                y_desc += 16
+        # ---------------------------------------------------------------------
+        # HUD
+        # ---------------------------------------------------------------------
 
-            # Status do Traçado de Raio / Iluminação Binária
-            status_luz = "1 - ILUMINADA POR LED" if (
-                (self.obra_foco_idx == 0 and self.busto_nefertiti.iluminado) or
-                (self.obra_foco_idx == 1 and self.moldura_toteninsel.iluminado) or
-                (self.obra_foco_idx == 2 and self.vitrine_papiro.iluminado)
-            ) else "0 - PENUMBRA AMBIENTE"
-            st_ilum = f"Visibilidade Binária (Spotlight): [{status_luz}]"
-            self.tela.blit(self.fonte_hud.render(st_ilum, True, COR_DESTAQUE_HUD), (LARGURA - 585, ALTURA - 50))
+        def desenhar_hud(self):
+            """Título, sala atual, barra de progresso, comandos e cartão da obra."""
+            tela = self.tela
+            obra = self.info_obras[self.obra_foco_idx]
 
+            # Painel superior
+            tela.blit(self._painel_topo, (esc(20), esc(12)))
+            tela.blit(self._texto(self.fonte_titulo,
+                                  "MUSEU VIRTUAL 3D — HISTÓRIA DA ARTE E DA ANTIGUIDADE",
+                                  COR_DESTAQUE_HUD), (esc(36), esc(18)))
 
-        def desenhar_tela_creditos(self):
-            """Tela sobreposta de Créditos e Referências da Atividade AP1 (Requisito 3.10)."""
-            overlay = pygame.Surface((LARGURA, ALTURA), pygame.SRCALPHA)
-            overlay.fill((8, 12, 20, 240))
-            self.tela.blit(overlay, (0, 0))
+            subtitulo = f"{obra['sala']}  |  Estado: [{self.estado_atual}]  |  Modo: [{self.modo_operacao}]"
+            tela.blit(self._texto(self.fonte_hud, subtitulo, COR_TEXTO_HUD), (esc(36), esc(45)))
 
-            txt_tit = self.fonte_titulo.render("PROJETO AP1 — COMPUTAÇÃO GRÁFICA E RA/RV", True, COR_DESTAQUE_HUD)
-            self.tela.blit(txt_tit, (LARGURA//2 - txt_tit.get_width()//2, 50))
+            # Barra de progresso da visita guiada
+            tempo_total = len(self.info_obras) * self.duracao_etapa
+            progresso = min(1.0, self.tempo_animacao / tempo_total) if tempo_total > 0 else 0.0
+            largura_barra = esc(320)
+            barra_x, barra_y, barra_h = LARGURA - esc(360), esc(48), esc(12)
+            pygame.draw.rect(tela, (40, 50, 70), (barra_x, barra_y, largura_barra, barra_h), border_radius=esc(4))
+            pygame.draw.rect(tela, COR_DESTAQUE_HUD,
+                             (barra_x, barra_y, int(largura_barra * progresso), barra_h), border_radius=esc(4))
+            tela.blit(self._texto(self.fonte_pequena,
+                                  f"Progresso Tour: {int(progresso * 100)}%",
+                                  COR_TEXTO_HUD), (barra_x, esc(28)))
 
-            sub_tit = self.fonte_subtitulo.render("Mundo Virtual Animado: Museu de História da Arte e da Antiguidade", True, (210, 230, 255))
-            self.tela.blit(sub_tit, (LARGURA//2 - sub_tit.get_width()//2, 85))
+            # Painel de comandos
+            tela.blit(self._painel_comandos, (esc(20), ALTURA - esc(135)))
 
-            # Divisão de Responsabilidades dos 4 Integrantes
+            # Cartão didático da obra
+            x = LARGURA - esc(585)
+            tela.blit(self._painel_obra, (LARGURA - esc(600), ALTURA - esc(195)))
+            tela.blit(self._texto(self.fonte_subtitulo, obra["titulo"], COR_DESTAQUE_HUD), (x, ALTURA - esc(188)))
+            tela.blit(self._texto(self.fonte_hud, f"Autor: {obra['artista']}", (255, 235, 170)), (x, ALTURA - esc(165)))
+            tela.blit(self._texto(self.fonte_pequena,
+                                  f"Período / Data: {obra['periodo']} ({obra['data']})",
+                                  COR_TEXTO_HUD), (x, ALTURA - esc(146)))
+            tela.blit(self._texto(self.fonte_pequena,
+                                  f"Material: {obra['material']}",
+                                  (190, 210, 230)), (x, ALTURA - esc(128)))
+            tela.blit(self._texto(self.fonte_pequena,
+                                  obra["localizacao"],
+                                  (190, 210, 230)), (x, ALTURA - esc(112)))
+
+            y = ALTURA - esc(94)
+            for linha in [l.strip() for l in obra["desc"].split("\n") if l.strip()][:2]:
+                tela.blit(self._texto(self.fonte_pequena, linha, COR_TEXTO_HUD), (x, y))
+                y += esc(15)
+
+            # Estado do traçado de raio / iluminação binária
+            obras = (self.busto_nefertiti, self.moldura_toteninsel, self.vitrine_papiro)
+            acesa = obras[self.obra_foco_idx].iluminado
+            status = "1 - ILUMINADA POR LED" if acesa else "0 - PENUMBRA AMBIENTE"
+            tela.blit(self._texto(self.fonte_hud,
+                                  f"Visibilidade Binária (Spotlight): [{status}]",
+                                  COR_DESTAQUE_HUD), (x, ALTURA - esc(50)))
+
+            if self.mostrar_fps:
+                fps = self.relogio.get_fps()
+                tela.blit(self._texto(self.fonte_pequena, f"{fps:5.1f} FPS", (150, 255, 180)),
+                          (LARGURA - esc(90), esc(12)))
+
+        # ---------------------------------------------------------------------
+        # CRÉDITOS
+        # ---------------------------------------------------------------------
+
+        def _montar_tela_creditos(self):
+            """Monta a tela de créditos uma vez; em uso ela vira um único blit."""
+            superficie = pygame.Surface((LARGURA, ALTURA), pygame.SRCALPHA)
+            superficie.fill((8, 12, 20, 240))
+
+            titulo = self.fonte_titulo.render("PROJETO AP1 — COMPUTAÇÃO GRÁFICA E RA/RV", True, COR_DESTAQUE_HUD)
+            superficie.blit(titulo, (LARGURA // 2 - titulo.get_width() // 2, esc(50)))
+
+            subtitulo = self.fonte_subtitulo.render(
+                "Mundo Virtual Animado: Museu de História da Arte e da Antiguidade",
+                True, (210, 230, 255))
+            superficie.blit(subtitulo, (LARGURA // 2 - subtitulo.get_width() // 2, esc(85)))
+
+            # Equipe: apenas os nomes dos quatro integrantes.
             integrantes = [
-                ("Integrante 1 (Coordenação e Integração)", "Estrutura do código, pipeline gráfico 3D->2D, compatibilidade e testes."),
-                ("Integrante 2 (Modelagem e Cena 3D)", "Salas temáticas, malha OBJ de Nefertiti, moldura 3D, vitrine e instâncias de pedestais."),
-                ("Integrante 3 (Animação e Estados)", "Máquina de 4 estados, sequenciamento temporal Delta t, rotações e transições."),
-                ("Integrante 4 (Câmera, Luz e Interface)", "Modos de câmera (Apresentação e WASD/Mouse), iluminação binária e HUD.")
+                "Gabriel Araujo Farias",
+                "Guilherme Amorim Rocha Lima",
+                "Mateus Deziderio Sanches",
+                "Richard Bernardino Mendes",
             ]
+            superficie.blit(self.fonte_subtitulo.render("Equipe de Alunos:", True, COR_DESTAQUE_HUD),
+                            (esc(120), esc(130)))
+            for i, nome in enumerate(integrantes):
+                superficie.blit(self.fonte_hud.render(f"• {nome}", True, (255, 230, 160)),
+                                (esc(140), esc(162) + i * esc(28)))
 
-            self.tela.blit(self.fonte_subtitulo.render("Equipe de Alunos e Responsabilidades:", True, COR_DESTAQUE_HUD), (120, 130))
-            for i, (nome, desc) in enumerate(integrantes):
-                txt_n = self.fonte_hud.render(f"• {nome}:", True, (255, 230, 160))
-                txt_d = self.fonte_pequena.render(f"   {desc}", True, COR_TEXTO_HUD)
-                self.tela.blit(txt_n, (140, 160 + i * 42))
-                self.tela.blit(txt_d, (140, 180 + i * 42))
-
-            # Referências das Obras e Materiais Didáticos
-            refs = [
+            referencias = [
                 "Variação Temática: Variação 1 — Museu Virtual (Abertura de salas, iluminação binária, visita guiada e rotação).",
                 "Obra 1 (Pintura): 'A Ilha dos Mortos' (Arnold Böcklin, 1880) — Domínio Público (Alte Nationalgalerie Berlin).",
                 "Obra 2 (Escultura): 'Busto de Nefertiti' (c. 1345 a.C.) — Digitalização 3D Fraunhofer IGD / CultLab3D (CC BY-NC).",
                 "Obra 3 (Manuscrito): 'Papiro de Ani - Livro dos Mortos' (c. 1250 a.C.) — British Museum / Wikimedia Commons.",
                 "Tecnologias: Python 3 + Pygame (Projeção Perspectiva Pura e Sombreamento Lambertiano sem OpenGL).",
-                "Referência Curricular: Aulas 01 a 10 de Computação Gráfica — Prof. Alex Torquato Souza Carneiro."
+                "Referência Curricular: Aulas 01 a 10 de Computação Gráfica — Prof. Alex Torquato Souza Carneiro.",
             ]
+            superficie.blit(self.fonte_subtitulo.render("Referências dos Materiais e Tecnologias:", True, COR_DESTAQUE_HUD),
+                            (esc(120), esc(300)))
+            for i, ref in enumerate(referencias):
+                superficie.blit(self.fonte_pequena.render(f"• {ref}", True, (200, 215, 235)),
+                                (esc(140), esc(335) + i * esc(26)))
 
-            self.tela.blit(self.fonte_subtitulo.render("Referências dos Materiais e Tecnologias:", True, COR_DESTAQUE_HUD), (120, 360))
-            for i, ref in enumerate(refs):
-                self.tela.blit(self.fonte_pequena.render(f"• {ref}", True, (200, 215, 235)), (140, 395 + i * 26))
+            fechar = self.fonte_hud.render("Pressione [K] para fechar esta tela e retornar ao museu.", True, COR_DESTAQUE_HUD)
+            superficie.blit(fechar, (LARGURA // 2 - fechar.get_width() // 2, ALTURA - esc(70)))
+            return superficie
 
-            txt_fechar = self.fonte_hud.render("Pressione [K] para fechar esta tela e retornar ao museu.", True, COR_DESTAQUE_HUD)
-            self.tela.blit(txt_fechar, (LARGURA//2 - txt_fechar.get_width()//2, ALTURA - 70))
-
-        # -------------------------------------------------------------------------
-        # LAÇO PRINCIPAL E GERENCIAMENTO DE EVENTOS
-        # -------------------------------------------------------------------------
+        def desenhar_tela_creditos(self):
+            self.tela.blit(self._tela_creditos, (0, 0))

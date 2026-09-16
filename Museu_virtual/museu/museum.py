@@ -1,8 +1,4 @@
-"""Composição da aplicação do Museu Virtual.
-
-A classe pública continua sendo MuseuVirtual3D, mas sua implementação foi
-separada em mixins por responsabilidade.
-"""
+"""Ponto de montagem da aplicação: reúne todos os mixins em uma única classe."""
 from .scene import SceneMixin
 from .navigation import NavigationMixin
 from .animation import AnimationMixin
@@ -19,5 +15,5 @@ class MuseuVirtual3D(
     UIMixin,
     AppMixin,
 ):
-    """Fachada principal que reúne os módulos da aplicação."""
+    """Classe principal do museu — combina cena, navegação, animação, renderização, UI e loop de eventos."""
     pass
